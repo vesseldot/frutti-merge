@@ -120,14 +120,17 @@ class Game:
 
     # MUSIC: inicio
     def _music_path(self, filename):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
+            os.path.join(base_dir, "assets", "music", filename),
+            os.path.join(base_dir, "Assets", "music", filename),
             os.path.join("assets", "music", filename),
             os.path.join("Assets", "music", filename),
         ]
         for path in candidates:
             if os.path.exists(path):
                 return path
-        return candidates[0]
+        return candidates[1]
 
     def _init_mixer(self):
         if pygame.mixer.get_init() is None:
