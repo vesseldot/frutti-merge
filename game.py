@@ -2,6 +2,7 @@
 game.py — Lógica principal: máquina de estados (menú, instrucciones, juego,
 game over), física, fusiones, modos de juego y control mouse/cámara.
 """
+import os
 import random
 import pygame
 import pymunk
@@ -23,6 +24,7 @@ class Game:
         self.control = C.CTRL_MOUSE
         self.tracker = None                  # HandTracker (si eligen cámara)
         self.t = 0.0                         # reloj global para animaciones
+        self.music_changed = False          # MUSIC: inicio
 
         # ---------------- botones del menú
         cx = C.WIDTH // 2
@@ -61,6 +63,7 @@ class Game:
         self.game_over_reason = ""
         self.final_scores = []
         self.holding = True                  # (cámara) puño cerrado = sosteniendo
+        self.music_changed = False          # MUSIC: fin
 
     def _build_walls(self):
         c = C.CONTAINER
@@ -115,6 +118,46 @@ class Game:
         self.next_tier = self._random_tier()
         self.cooldown = C.DROP_COOLDOWN
 
+    # MUSIC: inicio
+    def _music_path(self, filename):
+        candidates = [
+            os.path.join("assets", "music", filename),
+            os.path.join("Assets", "music", filename),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return candidates[0]
+
+    def _init_mixer(self):
+        if pygame.mixer.get_init() is None:
+            try:
+                pygame.mixer.init()
+            except pygame.error:
+                return False
+        return True
+
+    def _start_match_music(self):
+        if not self._init_mixer():
+            return
+        pygame.mixer.music.load(self._music_path("kawaii_kitsune.mp3"))
+        pygame.mixer.music.play(-1)
+
+    def _maybe_switch_music(self):
+        if self.music_changed:
+            return
+        if self.mode == C.MODE_TIME and self.time_left <= 60:
+            if not self._init_mixer():
+                return
+            pygame.mixer.music.load(self._music_path("musica2.mp3"))
+            pygame.mixer.music.play(-1)
+            self.music_changed = True
+
+    def _stop_music(self):
+        if pygame.mixer.get_init() is not None:
+            pygame.mixer.music.stop()
+    # MUSIC: fin
+
     # ================================================================ eventos
     def handle_event(self, event, mouse):
         if self.state == MENU:
@@ -122,6 +165,7 @@ class Game:
         elif self.state == INSTRUCTIONS:
             if self.btn_accept.clicked(event, mouse) or \
                (event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN):
+                self._start_match_music()
                 self.state = PLAYING
         elif self.state == PLAYING:
             if self.control == C.CTRL_MOUSE:
@@ -132,9 +176,11 @@ class Game:
         elif self.state == GAME_OVER:
             if self.btn_again.clicked(event, mouse):
                 self.reset_match()
+                self._start_match_music()
                 self.state = PLAYING
             if self.btn_menu.clicked(event, mouse):
                 self._close_camera()
+                self._stop_music()
                 self.reset_match()
                 self.state = MENU
 
@@ -220,11 +266,13 @@ class Game:
         # --- modo contrarreloj
         if self.mode == C.MODE_TIME:
             self.time_left -= dt
+            self._maybe_switch_music()
             if self.time_left <= 0:
                 self.time_left = 0
                 self._end_game("¡Se acabó el tiempo!")
 
     def _end_game(self, reason):
+        self._stop_music()
         self.game_over_reason = reason
         data = SC.save_score(self.mode, self.score)
         self.final_scores = data[self.mode]
