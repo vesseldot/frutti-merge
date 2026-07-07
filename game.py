@@ -224,7 +224,8 @@ class Game:
                       scale=C.VERSUS_FRUIT_SCALE, hand="Left", cam_range=(0.45, 1.0)),
             ]
         else:
-            self.boards = [Board(self, C.CONTAINER, self.control, accent=C.HEADER_COLOR)]
+            self.boards = [Board(self, C.CONTAINER, self.control, accent=C.HEADER_COLOR,
+                                 scale=C.SOLO_FRUIT_SCALE)]
 
     # ================================================================ SFX pop
     def _ensure_pop_sound(self):

@@ -44,6 +44,7 @@ DROP_HEIGHT = 90        # la fruta cuelga a esta altura sobre el contenedor
 CONTAINER_P1 = {"left":   90, "right":  670, "top": 280, "bottom": 1020, "wall": 16}
 CONTAINER_P2 = {"left": 1250, "right": 1830, "top": 280, "bottom": 1020, "wall": 16}
 VERSUS_FRUIT_SCALE = 0.88    # = 580/660 (ancho versus / ancho 1 jugador)
+SOLO_FRUIT_SCALE   = 0.80    # frutas más chicas en 1 jugador: caben más en el contenedor
 
 # ------------------------------------------------------------------ Física
 GRAVITY = (0, 1800)     # escalada a la nueva altura del contenedor
