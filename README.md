@@ -1,4 +1,4 @@
-# 🍉 FRUTAZO ^^ — Juego de fusión de frutas (tipo Suika)
+# 🍉 FRUTAZO ^^ — Juego de fusión de frutas 
 
 Proyecto universitario para la materia de **Graficación** (Verano 2026).
 
