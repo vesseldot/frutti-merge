@@ -1,7 +1,13 @@
 """
-fruit.py — Clase Fruit (física con pymunk) + dibujo kawaii por código.
+fruit.py — Clase Fruit (física con pymunk) + dibujo con sprites PNG.
+
+Los sprites viven en Assets/imagenes/ ({tier}.png). Al cargarlos se calcula el
+círculo real del cuerpo a partir del canal alpha (ignorando hojas/tallo) para
+que el dibujo coincida EXACTAMENTE con el círculo de física (hitbox). Si falta
+un PNG se usa el dibujo kawaii procedural original como respaldo.
 """
 import math
+import os
 import pygame
 import pymunk
 
@@ -13,20 +19,22 @@ FRUIT_COLLISION_TYPE = 1
 class Fruit:
     """Una fruta con cuerpo físico y carita kawaii."""
 
-    def __init__(self, space: pymunk.Space, x: float, y: float, tier: int):
+    def __init__(self, space: pymunk.Space, x: float, y: float, tier: int,
+                 scale: float = 1.0):
         self.tier = tier
         name, radius, color, edge, points = FRUITS[tier]
         self.name = name
-        self.radius = radius
+        self.scale = scale               # 2 jugadores: frutas proporcionales
+        self.radius = radius * scale
         self.color = color
         self.edge = edge
         self.points = points
 
-        mass = radius * radius * 0.02
-        moment = pymunk.moment_for_circle(mass, 0, radius)
+        mass = self.radius * self.radius * 0.02
+        moment = pymunk.moment_for_circle(mass, 0, self.radius)
         self.body = pymunk.Body(mass, moment)
         self.body.position = (x, y)
-        self.shape = pymunk.Circle(self.body, radius)
+        self.shape = pymunk.Circle(self.body, self.radius)
         self.shape.elasticity = ELASTICITY
         self.shape.friction = FRICTION
         self.shape.collision_type = FRUIT_COLLISION_TYPE
@@ -63,8 +71,119 @@ class Fruit:
             self.spawn_pop = max(0.0, self.spawn_pop - dt * 2.5)
 
 
-# ====================================================================== ARTE
+# ====================================================================== SPRITES
+_IMG_DIRS = (os.path.join("assets", "imagenes"), os.path.join("Assets", "imagenes"))
+_images: dict = {}       # nombre -> Surface | None
+_scaled: dict = {}       # (nombre, (w, h)) -> Surface | None
+_sprites: dict = {}      # tier -> (Surface con el cuerpo centrado, radio_cuerpo_px) | None
+_rot_cache: dict = {}    # (tier, radio_px, angulo_cuantizado) -> Surface
+
+
+def load_image(filename):
+    """Carga un PNG de Assets/imagenes (cacheado). Devuelve None si no existe."""
+    if filename not in _images:
+        surf = None
+        for d in _IMG_DIRS:
+            path = os.path.join(d, filename)
+            if os.path.exists(path):
+                try:
+                    surf = pygame.image.load(path)
+                    if pygame.display.get_surface():
+                        surf = surf.convert_alpha()
+                except pygame.error:
+                    surf = None
+                break
+        _images[filename] = surf
+    return _images[filename]
+
+
+def scaled_image(filename, size):
+    """Versión escalada (cacheada) de una imagen de Assets/imagenes."""
+    key = (filename, size)
+    if key not in _scaled:
+        img = load_image(filename)
+        _scaled[key] = pygame.transform.smoothscale(img, size) if img else None
+    return _scaled[key]
+
+
+def _body_circle(img):
+    """Círculo (cx, cy, r) del cuerpo de la fruta a partir del canal alpha.
+
+    Las hojas/tallo siempre están arriba y el cuerpo apoya en el borde
+    inferior del sprite, así que: r = mitad de la fila opaca más ancha del
+    65% inferior, y el centro queda a un radio del borde inferior.
+    """
+    w, h = img.get_size()
+    k = 100.0 / max(w, h)
+    small = pygame.transform.smoothscale(img, (max(1, int(w * k)), max(1, int(h * k))))
+    mask = pygame.mask.from_surface(small, 127)
+    sw, sh = small.get_size()
+    rows = []
+    for y in range(sh):
+        xs = [x for x in range(sw) if mask.get_at((x, y))]
+        rows.append((xs[0], xs[-1]) if xs else None)
+    ys = [y for y, row in enumerate(rows) if row]
+    if not ys:
+        return w / 2, h / 2, min(w, h) / 2
+    top, bottom = ys[0], ys[-1]
+    cut = top + int((bottom - top) * 0.35)
+    width, ybest = max((rows[y][1] - rows[y][0] + 1, y)
+                       for y in range(cut, bottom + 1) if rows[y])
+    r = width / 2.0
+    cx = (rows[ybest][0] + rows[ybest][1] + 1) / 2.0
+    cy = bottom + 1 - r
+    return cx / k, cy / k, r / k
+
+
+def _get_sprite(tier):
+    """Sprite del tier re-encuadrado para que el cuerpo quede en el centro.
+
+    Así la rotación y el blit centrado alinean el cuerpo del PNG con el
+    cuerpo físico de pymunk sin offsets por fruta.
+    """
+    if tier not in _sprites:
+        img = load_image(f"{tier}.png")
+        if img is None:
+            _sprites[tier] = None
+        else:
+            cx, cy, r = _body_circle(img)
+            w, h = img.get_size()
+            # re-muestrea a 2x: así TODOS los dibujados en pantalla son
+            # reducciones (nítidas) y nunca ampliaciones (pixeladas), y la
+            # rotación tiene el doble de muestras para interpolar
+            img = pygame.transform.smoothscale(img, (w * 2, h * 2))
+            cx, cy, r, w, h = cx * 2, cy * 2, r * 2, w * 2, h * 2
+            ext = int(max(cx, w - cx, cy, h - cy)) + 1
+            canvas = pygame.Surface((ext * 2, ext * 2), pygame.SRCALPHA)
+            canvas.blit(img, (round(ext - cx), round(ext - cy)))
+            _sprites[tier] = (canvas, r)
+    return _sprites[tier]
+
+
 def draw_fruit(screen, center, radius, tier, angle=0.0):
+    """Dibuja una fruta con su PNG (o arte procedural si no hay sprite).
+
+    El sprite se escala para que el radio del CUERPO coincida con el radio
+    físico (+2 px para que las frutas se aniden sin huecos visibles).
+    """
+    sprite = _get_sprite(tier)
+    if sprite is None:
+        _draw_fruit_procedural(screen, center, radius, tier, angle)
+        return
+    surf, body_r = sprite
+    deg = round(-math.degrees(angle) / 4) * 4      # cuantizado para cachear
+    key = (tier, int(radius), deg)
+    img = _rot_cache.get(key)
+    if img is None:
+        if len(_rot_cache) > 2500:
+            _rot_cache.clear()
+        img = pygame.transform.rotozoom(surf, deg, (radius + 2) / body_r)
+        _rot_cache[key] = img
+    screen.blit(img, img.get_rect(center=(int(center[0]), int(center[1]))))
+
+
+# ================================================== ARTE PROCEDURAL (respaldo)
+def _draw_fruit_procedural(screen, center, radius, tier, angle=0.0):
     """Dibuja una fruta kawaii: cuerpo, brillo, hoja/tallo y carita."""
     x, y = center
     name, _, color, edge, _ = FRUITS[tier]
