@@ -10,9 +10,18 @@ lateralidad: la mano DERECHA controla al Jugador 1 y la IZQUIERDA al
 Jugador 2 (MediaPipe clasifica cada mano; como procesamos la imagen ya
 espejeada, las etiquetas corresponden a la mano real de la persona).
 
+La captura y el procesamiento corren en un HILO aparte: `cap.read()` bloquea
+hasta que la webcam entrega imagen (~33 ms) y MediaPipe con dos manos puede
+tardar más que un frame del juego, así que hacerlo en el bucle principal
+congela el juego constantemente. El hilo mantiene el último estado detectado
+y `update()` solo copia ese snapshot; el gesto de soltar queda "latcheado"
+hasta que el juego lo consume, para no perder sueltas entre frames.
+
 Importa de forma segura: si opencv/mediapipe no están instalados, el juego
 sigue funcionando solo con mouse/teclado.
 """
+import threading
+import time
 
 try:
     import cv2
@@ -31,10 +40,11 @@ class HandState:
         self.detected = False      # ¿se ve esta mano en cámara?
         self.release_event = False # True solo el frame en que abre la mano
         self._was_closed = False
+        self._pending_release = False  # soltar detectado por el hilo, aún no consumido
 
 
 class HandTracker:
-    """Lee la webcam y expone el estado de cada mano.
+    """Lee la webcam en segundo plano y expone el estado de cada mano.
 
     - `hand()` o `hand(None)`  -> primera mano detectada (modo 1 jugador)
     - `hand("Right")`          -> mano derecha (Jugador 1 en versus)
@@ -47,20 +57,40 @@ class HandTracker:
     def __init__(self, cam_index: int = 0, num_hands: int = 1):
         if not AVAILABLE:
             raise RuntimeError("mediapipe/opencv no instalados")
-        self.cap = cv2.VideoCapture(cam_index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap = self._open_capture(cam_index)
         self.hands = mp.solutions.hands.Hands(
             max_num_hands=num_hands,
             model_complexity=0,
             min_detection_confidence=0.6,
             min_tracking_confidence=0.5,
         )
+        # _raw: estados que escribe el hilo · states: snapshot que lee el juego
+        self._raw   = {"any": HandState(), "Right": HandState(), "Left": HandState()}
         self.states = {"any": HandState(), "Right": HandState(), "Left": HandState()}
         self.hand_x = 0.5
         self.closed = False
         self.detected = False
         self.release_event = False
+
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _open_capture(cam_index):
+        # En Windows el backend DirectShow abre y lee más rápido que MSMF
+        cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(cam_index)
+        if not cap.isOpened():
+            cap.release()
+            raise RuntimeError("no se encontró la webcam")
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        return cap
 
     # ------------------------------------------------------------------
     def hand(self, label=None) -> HandState:
@@ -83,22 +113,28 @@ class HandTracker:
 
         # evento de soltar: estaba cerrada y ahora abrió
         if st._was_closed and not now_closed:
-            st.release_event = True
+            st._pending_release = True
         st._was_closed = now_closed
         st.closed = now_closed
 
-    def update(self):
-        """Procesa un frame. Llamar UNA vez por frame del juego."""
-        for st in self.states.values():
-            st.release_event = False
-
-        seen = set()
-        if self.cap.isOpened():
-            ok, frame = self.cap.read()
-            if ok:
+    # ------------------------------------------------------------------ hilo
+    def _capture_loop(self):
+        """Corre en segundo plano al ritmo de la webcam, no del juego."""
+        while self._running:
+            try:
+                ok, frame = self.cap.read()
+                if not ok:
+                    time.sleep(0.05)
+                    continue
                 frame = cv2.flip(frame, 1)               # espejo natural
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 result = self.hands.process(rgb)
+            except Exception:
+                time.sleep(0.05)     # un frame malo no debe tumbar el juego
+                continue
+
+            seen = set()
+            with self._lock:
                 if result.multi_hand_landmarks:
                     handedness = result.multi_handedness or []
                     for i, lms in enumerate(result.multi_hand_landmarks):
@@ -110,13 +146,24 @@ class HandTracker:
                         if label not in seen:
                             targets.append(label)
                         for t in targets:
-                            self._update_state(self.states[t], lms.landmark)
+                            self._update_state(self._raw[t], lms.landmark)
                             seen.add(t)
+                for name, st in self._raw.items():
+                    if name not in seen:
+                        st.detected = False
+                        st._was_closed = False   # evita soltar fantasma al reaparecer
 
-        for name, st in self.states.items():
-            if name not in seen:
-                st.detected = False
-                st._was_closed = False   # evita soltar fantasma al reaparecer
+    # ------------------------------------------------------------------
+    def update(self):
+        """Copia el último estado del hilo de cámara. Llamar UNA vez por frame."""
+        with self._lock:
+            for name, raw in self._raw.items():
+                st = self.states[name]
+                st.hand_x = raw.hand_x
+                st.closed = raw.closed
+                st.detected = raw.detected
+                st.release_event = raw._pending_release
+                raw._pending_release = False
 
         # compatibilidad: atributos planos = primera mano detectada
         any_st = self.states["any"]
@@ -127,6 +174,9 @@ class HandTracker:
 
     # ------------------------------------------------------------------
     def close(self):
+        self._running = False
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         if self.cap:
             self.cap.release()
         self.hands.close()
